@@ -1,0 +1,7 @@
+name: catch_lab
+channels:
+  - defaults
+dependencies:
+  - python=3.8
+  - pip
+prefix: /home/nano/miniconda3/envs/catch_lab

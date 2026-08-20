@@ -7,3 +7,7 @@ result/
 .vscode/
 *.DS_Store
 venv/
+dataset/
+results/
+*.zip
+__pycache__/
