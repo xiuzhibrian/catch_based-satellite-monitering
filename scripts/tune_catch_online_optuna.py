@@ -446,10 +446,10 @@ def suggest_for_stage(
 
     elif stage == "patch":
         p["patch_size"] = trial.suggest_categorical(
-            "patch_size", [8, 16, 32]
+            "patch_size", [8, 16, 32, 48]
         )
         p["patch_stride"] = trial.suggest_categorical(
-            "patch_stride", [4, 8, 16]
+            "patch_stride", [1, 2, 4, 8, 16, 32]
         )
 
     elif stage == "loss":
@@ -649,7 +649,27 @@ def run_stage(args, stage: str, current_params: dict) -> tuple[dict, dict]:
     db_path = args.output_dir / "optuna_studies.db"
     storage = f"sqlite:///{db_path.resolve().as_posix()}"
 
-    sampler = optuna.samplers.TPESampler(seed=args.seed)
+    # geometry / patch have small discrete search spaces.
+    # Use exhaustive GridSampler so every parameter combination is evaluated once.
+    # Other stages keep the original TPE automatic optimization.
+    if stage == "geometry":
+        sampler = optuna.samplers.GridSampler(
+            search_space={
+                "seq_len": [128, 192],
+                "inference_patch_size": [8, 16, 32, 48],
+                "online_stride": [16, 32, 64],
+                "inference_patch_stride": [1, 2, 4],
+            }
+        )
+    elif stage == "patch":
+        sampler = optuna.samplers.GridSampler(
+            search_space={
+                "patch_size": [8, 16, 32, 48],
+                "patch_stride": [1, 2, 4, 8, 16, 32],
+            }
+        )
+    else:
+        sampler = optuna.samplers.TPESampler(seed=args.seed)
 
     study = optuna.create_study(
         study_name=f"{args.study_prefix}_{stage}",
@@ -734,12 +754,53 @@ def run_stage(args, stage: str, current_params: dict) -> tuple[dict, dict]:
                 # We cannot reliably know state here until objective returns,
                 # so successful log cleanup is handled after optimize.
 
-    study.optimize(
-        objective,
-        n_trials=args.n_trials,
-        gc_after_trial=True,
-        show_progress_bar=True,
-    )
+    # Prevent Optuna from failing when the search space is smaller than
+    # requested n_trials. Do NOT resample duplicated combinations.
+    # Only add the remaining available unique trials.
+    completed_or_finished = len(study.trials)
+
+    available_combinations = None
+    if stage == "geometry":
+        # seq_len(2) * inference_patch_size(4) * online_stride(3) * inference_patch_stride(3)
+        available_combinations = 2 * 4 * 3 * 3
+    elif stage == "patch":
+        # patch_size(4) * patch_stride(6)
+        available_combinations = 4 * 6
+    elif stage == "threshold":
+        # anomaly_ratio: 5 choices
+        available_combinations = 5
+
+    if available_combinations is not None:
+        remaining_unique = max(
+            0,
+            available_combinations - completed_or_finished
+        )
+        trials_to_run = min(args.n_trials, remaining_unique)
+
+        print(
+            f"[SEARCH SPACE] {stage}: "
+            f"{available_combinations} unique combinations available."
+        )
+        print(
+            f"[OPTUNA] Requested {args.n_trials}, "
+            f"running {trials_to_run} new unique trials."
+        )
+
+        if trials_to_run == 0:
+            print(
+                f"[OPTUNA] Stage '{stage}' search space exhausted. "
+                "Skip new trials and use existing completed trials."
+            )
+    else:
+        trials_to_run = args.n_trials
+
+    if trials_to_run > 0:
+        study.optimize(
+            objective,
+            n_trials=trials_to_run,
+            gc_after_trial=True,
+            show_progress_bar=True,
+        )
 
     # Remove logs from COMPLETE trials unless user asks to keep everything.
     if not args.keep_trial_files:
